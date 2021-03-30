@@ -21,7 +21,7 @@ const PNG = 'image/png'
 const JPEG = 'image/jpeg'
 const GIF = 'image/gif'
 const SVG = 'image/svg+xml'
-const CACHE_VERSION = 2
+const CACHE_VERSION = 3
 const MODERN_TYPES = [/* AVIF, */ WEBP]
 const ANIMATABLE_TYPES = [WEBP, PNG, GIF]
 const VECTOR_TYPES = [SVG]
@@ -139,15 +139,18 @@ export async function imageOptimizer(
   if (await fileExists(hashDir, 'directory')) {
     const files = await promises.readdir(hashDir)
     for (let file of files) {
-      const [prefix, etag, extension] = file.split('.')
-      const expireAt = Number(prefix)
+      const [fileRawMaxAge, fileRawExpires, etag, extension] = file.split('.')
+
+      const maxAge = Number(fileRawMaxAge)
+      const expireAt = Number(fileRawExpires)
       const contentType = getContentType(extension)
       const fsPath = join(hashDir, file)
+
       if (now < expireAt) {
-        res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate')
         if (sendEtagResponse(req, res, etag)) {
           return { finished: true }
         }
+        res.setHeader('Cache-Control', `public, max-age=${maxAge}`)
         if (contentType) {
           res.setHeader('Content-Type', contentType)
         }
@@ -226,8 +229,14 @@ export async function imageOptimizer(
     const animate =
       ANIMATABLE_TYPES.includes(upstreamType) && isAnimated(upstreamBuffer)
     if (vector || animate) {
-      await writeToCacheDir(hashDir, upstreamType, expireAt, upstreamBuffer)
-      sendResponse(req, res, upstreamType, upstreamBuffer)
+      await writeToCacheDir(
+        hashDir,
+        upstreamType,
+        expireAt,
+        maxAge,
+        upstreamBuffer
+      )
+      sendResponse(req, res, upstreamType, maxAge, upstreamBuffer)
       return { finished: true }
     }
 
@@ -295,13 +304,19 @@ export async function imageOptimizer(
     }
 
     if (optimizedBuffer) {
-      await writeToCacheDir(hashDir, contentType, expireAt, optimizedBuffer)
-      sendResponse(req, res, contentType, optimizedBuffer)
+      await writeToCacheDir(
+        hashDir,
+        contentType,
+        expireAt,
+        maxAge,
+        optimizedBuffer
+      )
+      sendResponse(req, res, contentType, maxAge, optimizedBuffer)
     } else {
       throw new Error('Unable to optimize buffer')
     }
   } catch (error) {
-    sendResponse(req, res, upstreamType, upstreamBuffer)
+    sendResponse(req, res, upstreamType, maxAge, upstreamBuffer)
   }
 
   return { finished: true }
@@ -311,12 +326,13 @@ async function writeToCacheDir(
   dir: string,
   contentType: string,
   expireAt: number,
+  maxAge: number,
   buffer: Buffer
 ) {
   await promises.mkdir(dir, { recursive: true })
   const extension = getExtension(contentType)
   const etag = getHash([buffer])
-  const filename = join(dir, `${expireAt}.${etag}.${extension}`)
+  const filename = join(dir, `${maxAge}.${expireAt}.${etag}.${extension}`)
   await promises.writeFile(filename, buffer)
 }
 
@@ -324,10 +340,13 @@ function sendResponse(
   req: IncomingMessage,
   res: ServerResponse,
   contentType: string | null,
+  fileMaxAge: number,
   buffer: Buffer
 ) {
   const etag = getHash([buffer])
-  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate')
+
+  res.setHeader('Cache-Control', `public, max-age=${fileMaxAge}`)
+
   if (sendEtagResponse(req, res, etag)) {
     return
   }
